@@ -49,6 +49,7 @@ filtered_patients AS (
     JOIN patients_with_enough_creatinine_measurements USING (subject_id)
     JOIN physionet-data.mimiciv_icu.icustays icu ON adult_patients.subject_id = icu.subject_id
 ),
+
 physiological_data AS (
     SELECT
         f.subject_id,
@@ -79,6 +80,7 @@ physiological_data AS (
     AND DATE_DIFF(l.charttime, f.intime, DAY) BETWEEN 0 AND 2
     GROUP BY f.subject_id, day
 ),
+
 vital_signs_data AS (
     SELECT
         f.subject_id,
@@ -99,24 +101,25 @@ vital_signs_data AS (
 patient_weight AS (
     SELECT
         subject_id,
-        AVG(valuenum) AS weight 
+        AVG(valuenum) AS weight
     FROM `physionet-data.mimiciv_icu.chartevents`
-    WHERE itemid = 226512 
-    AND subject_id IN (SELECT subject_id FROM filtered_patients) 
+    WHERE itemid = 226512
+    AND subject_id IN (SELECT subject_id FROM filtered_patients)
     GROUP BY subject_id
 ),
 
 urine_output_data AS (
     SELECT
         f.subject_id,
-        AVG(CAST(c.value AS FLOAT64)) / w.weight AS avg_urine_output_per_kg 
+        AVG(CAST(c.value AS FLOAT64)) / w.weight AS avg_urine_output_per_kg
     FROM physionet-data.mimiciv_icu.outputevents c
     JOIN filtered_patients f ON c.subject_id = f.subject_id
     JOIN patient_weight w ON f.subject_id = w.subject_id
     WHERE c.itemid IN (40055, 43175, 40069, 40094, 40715, 226559, 226560, 226561, 226563, 226564, 226565, 226567)
-    AND DATE_DIFF(c.charttime, f.intime, DAY) = 0 
+    AND DATE_DIFF(c.charttime, f.intime, DAY) = 0
     GROUP BY f.subject_id, w.weight
 ),
+
 days AS (
     SELECT 1 AS day UNION ALL
     SELECT 2 UNION ALL
@@ -127,15 +130,22 @@ days AS (
 
 urine_output AS (
     SELECT
-        subject_id,
-        charttime,
-        value AS urine_output, 
-        LEAD(charttime) OVER (PARTITION BY subject_id ORDER BY charttime) AS next_time, 
-        TIMESTAMP_DIFF(LEAD(charttime) OVER (PARTITION BY subject_id ORDER BY charttime), charttime, HOUR) AS hours_between 
-    FROM `physionet-data.mimiciv_icu.outputevents`
-    WHERE itemid IN (40055, 43175, 40069, 40094, 40715, 226559, 226560, 226561, 226563, 226564, 226565, 226567) 
-    AND subject_id IN (SELECT subject_id FROM filtered_patients) 
+        c.subject_id,
+        c.charttime,
+        c.value AS urine_output,
+        LEAD(c.charttime) OVER (PARTITION BY c.subject_id ORDER BY c.charttime) AS next_time,
+        TIMESTAMP_DIFF(LEAD(c.charttime) OVER (PARTITION BY c.subject_id ORDER BY c.charttime), c.charttime, HOUR) AS hours_between
+    FROM `physionet-data.mimiciv_icu.outputevents` c
+    JOIN `physionet-data.mimiciv_icu.icustays` icu
+    ON c.subject_id = icu.subject_id
+    WHERE c.itemid IN (40055, 43175, 40069, 40094, 40715, 226559, 226560, 226561, 226563, 226564, 226565, 226567)
+    AND c.subject_id IN (SELECT subject_id FROM filtered_patients)
+    AND c.charttime BETWEEN icu.intime AND TIMESTAMP_ADD(icu.intime, INTERVAL 72 HOUR)
 ),
+
+
+
+
 
 
 urine_output_per_kg_per_hour AS (
@@ -145,23 +155,25 @@ urine_output_per_kg_per_hour AS (
         u.urine_output,
         w.weight,
         u.hours_between,
-        (u.urine_output / (w.weight * u.hours_between)) AS urine_per_kg_per_hour 
+        (u.urine_output / (w.weight * u.hours_between)) AS urine_per_kg_per_hour
     FROM urine_output u
     JOIN patient_weight w ON u.subject_id = w.subject_id
-    WHERE u.hours_between > 0 
-    AND u.subject_id IN (SELECT subject_id FROM filtered_patients) 
+    WHERE u.hours_between > 0
+    AND u.subject_id IN (SELECT subject_id FROM filtered_patients)
 ),
 
 
 aki_patients AS (
     SELECT
         subject_id,
-        COUNTIF(urine_per_kg_per_hour < 0.5) AS low_urine_hours 
+        COUNTIF(urine_per_kg_per_hour < 0.5) AS low_urine_hours
     FROM urine_output_per_kg_per_hour
     GROUP BY subject_id
-    HAVING low_urine_hours >= 6 
-    AND subject_id IN (SELECT subject_id FROM filtered_patients) 
+    HAVING low_urine_hours >= 6
+    AND subject_id IN (SELECT subject_id FROM filtered_patients)
 ),
+
+
 aki_status AS (
     SELECT
         p.subject_id,
@@ -170,7 +182,7 @@ aki_status AS (
         p3.creatinine_max AS day3_creatinine_max,
         CASE
             WHEN (p2.creatinine_max - p.creatinine_min >= 0.3) OR (p3.creatinine_max - p.creatinine_min >= 0.3) THEN 'AKI'
-            WHEN (p.creatinine_min IS NOT NULL AND p.creatinine_min != 0) AND 
+            WHEN (p.creatinine_min IS NOT NULL AND p.creatinine_min != 0) AND
                  ((p2.creatinine_max / NULLIF(p.creatinine_min, 0) >= 1.5) OR (p3.creatinine_max / NULLIF(p.creatinine_min, 0) >= 1.5)) THEN 'AKI'
             WHEN (p.subject_id IN (SELECT DISTINCT subject_id FROM aki_patients)) THEN 'AKI'
             ELSE 'Non-AKI'
@@ -179,7 +191,7 @@ aki_status AS (
     LEFT JOIN physiological_data p2 ON p.subject_id = p2.subject_id AND p2.day = 2
     LEFT JOIN physiological_data p3 ON p.subject_id = p3.subject_id AND p3.day = 3
     WHERE p.day = 1
-    AND p.subject_id IN (SELECT subject_id FROM filtered_patients) 
+    AND p.subject_id IN (SELECT subject_id FROM filtered_patients)
 )
 
 
@@ -221,7 +233,7 @@ FROM filtered_patients f
 CROSS JOIN days d
 LEFT JOIN physiological_data p ON f.subject_id = p.subject_id AND d.day = p.day
 LEFT JOIN vital_signs_data v ON f.subject_id = v.subject_id AND d.day = v.day
-LEFT JOIN urine_output_data u ON f.subject_id = u.subject_id 
+LEFT JOIN urine_output_data u ON f.subject_id = u.subject_id
 LEFT JOIN aki_status a ON f.subject_id = a.subject_id
 WHERE d.day=1
 ORDER BY f.subject_id
